@@ -29,17 +29,21 @@ struct Message {
 unordered_map<string, vector<Message>> chatLogs; // Chat logs separated by origin
 unordered_map<string, int> maxSeqNos; // Highest sequence number seen for each origin
 mutex logsMutex; // Mutex for synchronizing access to chatLogs and maxSeqNos
+std::string serverIdentifier;
 
 // Function declarations
 void processProxyCommand(int sock, const string& command);
 void processPeerMessage(int sock, const string& message, const string& messageType);
-void forwardMessage(const Message& msg);
+void forwardMessage(const Message& msg, int currPort);
 void respondToStatus(int sock, const string& statusMessage);
 string compileStatusMessage();
 void handleConnection(int sock);
 void antiEntropy();
 void sendMessage(int destPort, const string& msg);
 void startServer(int port);
+int getRandomNeighborPort(int currentPort);
+bool flipCoin();
+void processNewClientMessage(int sock, const string& receivedData);
 
 
 int main(int argc, char* argv[]) {
@@ -52,7 +56,7 @@ int main(int argc, char* argv[]) {
     // Start anti-entropy process
     thread antiEntropyThread(antiEntropy);
     antiEntropyThread.detach();
-    
+    serverIdentifier = std::to_string(portNo);
     // Start server
     startServer(portNo);
 
@@ -123,10 +127,46 @@ void handleConnection(int sock) {
         processPeerMessage(sock, receivedData, "RUMOR");
     } else if (receivedData.find("STATUS") == 0) {
         processPeerMessage(sock, receivedData, "STATUS");
+    } else if (receivedData.find("msg") == 0) {
+        processNewClientMessage(sock, receivedData);
     }
 
 
     close(sock); // Close the socket after processing the command or message
+}
+
+void processNewClientMessage(int sock, const string& receivedData) {
+    // Assuming receivedData format for new message is "msg <Origin> <Text>"
+    stringstream ss(receivedData);
+    string messageType, origin, text;
+    
+    getline(ss, messageType, ' '); // Skip the "msg" part
+    getline(ss, origin, ' '); // Get the origin (username or identifier)
+    
+    getline(ss, text); // The rest is the message text
+    
+    int newSeqNo;
+    {
+        lock_guard<mutex> guard(logsMutex); // Ensure thread safety when accessing shared data
+        
+        // If this server is the origin of the message, increment sequence number for this origin
+        if (origin == serverIdentifier) { // Replace with actual check for server's identifier
+            maxSeqNos[origin]++; // Increment sequence number for new message
+            newSeqNo = maxSeqNos[origin];
+        } else {
+            // If the message is being forwarded and already has a sequence number, use that
+            // This part assumes the receivedData includes the sequence number for forwarded messages
+            // You'll need to adjust how you parse receivedData to extract the sequence number if forwarding
+            newSeqNo = stoi(text.substr(0, text.find(' '))); // Example, adjust based on actual format
+            text = text.substr(text.find(' ') + 1); // Adjust based on actual format
+        }
+        
+        // Store the new message in the chat log
+        chatLogs[origin].push_back({origin, newSeqNo, text});
+    }
+    
+    // Forward the message to another peer
+    forwardMessage({origin, newSeqNo, text}, sock);
 }
 
 void processProxyCommand(int sock, const string& command) {
@@ -165,7 +205,7 @@ void processPeerMessage(int sock, const string& message, const string& messageTy
             maxSeqNos[origin] = seqNo;
 
             // Forward the message to another peer
-            forwardMessage({origin, seqNo, text});
+            forwardMessage({origin, seqNo, text}, sock);
         }
     } else if (messageType == "STATUS") {
         // Process the status message
@@ -174,10 +214,8 @@ void processPeerMessage(int sock, const string& message, const string& messageTy
     }
 }
 
-void forwardMessage(const Message& msg) {
-    // Select a random peer other than the message's origin
-    int peerIndex = rand() % MAX_PEERS;
-    int destPort = BASE_PORT + peerIndex;
+void forwardMessage(const Message& msg, int currPort) {
+    int destPort = getRandomNeighborPort(currPort);
 
     // Convert the message to string format
     string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
@@ -187,9 +225,68 @@ void forwardMessage(const Message& msg) {
 }
 
 void respondToStatus(int sock, const string& statusMessage) {
-    // Parse the status message to determine what the peer is missing
-    // Then, compile and send those messages
-    // This function would involve comparing received status with your chatLogs and maxSeqNos
+    lock_guard<mutex> guard(logsMutex); // Lock for thread safety
+    
+    bool shouldSendOwnStatus = false;
+    bool sentRumor = false;
+    stringstream ss(statusMessage);
+    string dummy, token;
+    getline(ss, dummy, ' '); // Skip the STATUS word
+
+    unordered_map<string, int> peerStatus; // Stores the status message in a map for easy lookup
+
+    // Parse the status message
+    while (getline(ss, token, ' ')) {
+        size_t delimPos = token.find(":");
+        if (delimPos != string::npos) {
+            string origin = token.substr(0, delimPos);
+            int seqNo = stoi(token.substr(delimPos + 1));
+            peerStatus[origin] = seqNo;
+        }
+    }
+
+    // Determine messages to send based on comparison
+    for (const auto& [origin, seqNo] : maxSeqNos) {
+        auto it = peerStatus.find(origin);
+        if (it == peerStatus.end() || it->second < seqNo) {
+            // The peer is missing at least one message from this origin.
+            for (const auto& msg : chatLogs[origin]) {
+                if (msg.seqNo >= (it == peerStatus.end() ? 1 : it->second)) {
+                    // Send messages the peer is missing
+                    string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
+                    sendMessage(sock, messageString);
+                    sentRumor = true;
+                }
+            }
+        }
+    }
+
+    // Check if we are missing messages
+    for (const auto& [origin, seqNo] : peerStatus) {
+        if (maxSeqNos[origin] < seqNo) {
+            shouldSendOwnStatus = true;
+            break;
+        }
+    }
+
+    if (shouldSendOwnStatus) {
+        string myStatus = compileStatusMessage();
+        sendMessage(sock, myStatus); // Assume this sends the status message back to the peer
+    }
+    if (!sentRumor && !shouldSendOwnStatus) {
+        if (flipCoin()) {
+            int newNeighborPort = getRandomNeighborPort(sock);
+            if (newNeighborPort != -1) {
+                string myStatus = compileStatusMessage();
+                sendMessage(newNeighborPort, myStatus); // Send your status to start rumormongering with the new neighbor
+            } else {
+                std::cout << "No valid neighbors to continue rumormongering." << std::endl;
+            }
+        } else {
+            // Tails: Cease the rumormongering process
+            std::cout << "Ceasing rumormongering process." << std::endl;
+        }
+    }
 }
 
 void antiEntropy() {
@@ -244,4 +341,35 @@ void sendMessage(int destPort, const string& msg) {
 
     // Close the socket after sending the message
     close(sock);
+}
+
+int getRandomNeighborPort(int currentPort) {
+    vector<int> possibleNeighbors;
+
+    // Check if the previous port is valid
+    if (currentPort > BASE_PORT) {
+        possibleNeighbors.push_back(currentPort - 1);
+    }
+
+    // Check if the next port is valid
+    if (currentPort < BASE_PORT + MAX_PEERS - 1) {
+        possibleNeighbors.push_back(currentPort + 1);
+    }
+
+    // Now, randomly select a neighbor from the possible options
+    if (!possibleNeighbors.empty()) {
+        srand(time(0) + currentPort); // Use currentPort to seed for variety per process
+        int randomIndex = rand() % possibleNeighbors.size();
+        return possibleNeighbors[randomIndex];
+    }
+
+    return -1; // Indicate an error or no valid neighbors
+}
+
+bool flipCoin() {
+    std::random_device rd; // Obtain a random number from hardware
+    std::mt19937 gen(rd()); // Seed the generator
+    std::bernoulli_distribution d(0.5); // Define a distribution with a 50/50 chance
+
+    return d(gen); // Returns true for "heads", false for "tails"
 }
