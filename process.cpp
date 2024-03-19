@@ -46,6 +46,7 @@ int getRandomNeighborPort(int currentPort);
 bool flipCoin();
 void processNewClientMessage(int sock, const string& receivedData);
 void processPeerMessage(const string& message, const string& messageType);
+bool isPortActive(int port);
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
@@ -317,14 +318,15 @@ void antiEntropy() {
     while (true) {
         this_thread::sleep_for(chrono::seconds(10)); // Adjust timing as needed
 
-        int peerIndex = rand() % SERVER_COUNT;
-        int destPort = BASE_PORT + peerIndex;
+        int destPort = getRandomNeighborPort(stoi(serverIdentifier));
 
         // Compile a status message
         string statusMessage = compileStatusMessage();
 
         // Send the status message to a randomly selected peer
-        sendMessage(destPort, statusMessage);
+        if (destPort != -1) {
+            sendMessage(destPort, statusMessage);
+        }
     }
 }
 
@@ -372,25 +374,26 @@ void sendMessage(int destPort, const string& msg) {
 int getRandomNeighborPort(int currentPort) {
     vector<int> possibleNeighbors;
 
-    // Check if the previous port is valid
-    if (currentPort > BASE_PORT) {
+    // Check if the previous port is active and valid
+    if (currentPort > BASE_PORT && isPortActive(currentPort - 1)) {
         possibleNeighbors.push_back(currentPort - 1);
     }
 
-    // Check if the next port is valid
-    if (currentPort < BASE_PORT + MAX_PEERS - 1) {
+    // Check if the next port is active and valid
+    if (currentPort < BASE_PORT + SERVER_COUNT - 1 && isPortActive(currentPort + 1)) {
         possibleNeighbors.push_back(currentPort + 1);
     }
 
-    // Now, randomly select a neighbor from the possible options
+    // Now, randomly select a neighbor from the possible (and active) options
     if (!possibleNeighbors.empty()) {
         srand(time(0) + currentPort); // Use currentPort to seed for variety per process
         int randomIndex = rand() % possibleNeighbors.size();
         return possibleNeighbors[randomIndex];
     }
 
-    return -1; // Indicate an error or no valid neighbors
+    return -1; // Indicate an error or no valid (active) neighbors
 }
+
 
 bool flipCoin() {
     std::random_device rd; // Obtain a random number from hardware
@@ -398,4 +401,22 @@ bool flipCoin() {
     std::bernoulli_distribution d(0.5); // Define a distribution with a 50/50 chance
 
     return d(gen); // Returns true for "heads", false for "tails"
+}
+
+bool isPortActive(int port) {
+    int testSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (testSock < 0) {
+        cerr << "Error creating socket for testing port activity." << endl;
+        return false;
+    }
+
+    sockaddr_in testAddr{};
+    testAddr.sin_family = AF_INET;
+    testAddr.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &testAddr.sin_addr);
+
+    // Attempt to connect to the port
+    bool active = connect(testSock, (sockaddr*)&testAddr, sizeof(testAddr)) >= 0;
+    close(testSock); // Close the socket after testing
+    return active;
 }
