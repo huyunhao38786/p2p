@@ -189,12 +189,13 @@ void processPeerMessage(const string& message, const string& messageType) {
 
     if (messageType == "RUMOR") {
         stringstream ss(message);
-        string dummy, origin, text;
+        string dummy, origin, text, msgOrigin;
         int seqNo;
-        ss >> dummy >> origin >> seqNo;
+        ss >> dummy >> origin >> seqNo >> msgOrigin;
         getline(ss, text);
         text = text.substr(1); // Remove leading space
-
+        string myStatus = compileStatusMessage();
+        sendMessage(stoi(msgOrigin), myStatus); // sends the status message back to the peer
         // Check if this is a new message
         if (maxSeqNos.find(origin) == maxSeqNos.end()){
             chatLogs[origin] = vector<Message>{};
@@ -214,10 +215,10 @@ void processPeerMessage(const string& message, const string& messageType) {
         // Process the status message
         // Respond with any messages the sender is missing
         stringstream ss(message);
-        string dummy, peerOrigin;
+        string dummy, peerOrigin, msgOrigin;
         int peerSeqNo;
 
-        ss >> dummy;
+        ss >> dummy >> msgOrigin;
         unordered_map<string, int> peerStatus;
         while(ss >> peerOrigin >> peerSeqNo){
             peerStatus[peerOrigin] = peerSeqNo;
@@ -226,9 +227,9 @@ void processPeerMessage(const string& message, const string& messageType) {
             if(peerStatus.find(origin) == peerStatus.end() || peerStatus[origin] < seqNo){
                 for(const auto& msg : chatLogs[origin]){
                     if(msg.seqNo >= peerStatus[origin]){
-                        int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                        int destPort = stoi(msgOrigin); // should be the status message origin
                         sentRumor = true;
-                        sendMessage(destPort, "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + "  " + msg.text);
+                        sendMessage(destPort, "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + "  " + serverIdentifier + " " + msg.text);
                     }
                 }
             }
@@ -236,7 +237,7 @@ void processPeerMessage(const string& message, const string& messageType) {
         for(const auto& [peerOrigin, peerSeqNo] : peerStatus){
             if(maxSeqNos[peerOrigin] < peerSeqNo){
                 sentStatus = true;
-                int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                int destPort = stoi(msgOrigin);
                 sendMessage(destPort, compileStatusMessage());
                 break;
             }
@@ -268,70 +269,70 @@ void forwardMessage(const Message& msg, int currPort) {
     sendMessage(destPort, messageString);
 }
 
-void respondToStatus(int sock, const string& statusMessage) {
-    lock_guard<mutex> guard(logsMutex); // Lock for thread safety
+// void respondToStatus(int sock, const string& statusMessage) {
+//     lock_guard<mutex> guard(logsMutex); // Lock for thread safety
     
-    bool shouldSendOwnStatus = false;
-    bool sentRumor = false;
-    stringstream ss(statusMessage);
-    string dummy, token;
-    getline(ss, dummy, ' '); // Skip the STATUS word
+//     bool shouldSendOwnStatus = false;
+//     bool sentRumor = false;
+//     stringstream ss(statusMessage);
+//     string dummy, token;
+//     getline(ss, dummy, ' '); // Skip the STATUS word
 
-    unordered_map<string, int> peerStatus; // Stores the status message in a map for easy lookup
+//     unordered_map<string, int> peerStatus; // Stores the status message in a map for easy lookup
 
-    // Parse the status message
-    while (getline(ss, token, ' ')) {
-        size_t delimPos = token.find(":");
-        if (delimPos != string::npos) {
-            string origin = token.substr(0, delimPos);
-            int seqNo = stoi(token.substr(delimPos + 1));
-            peerStatus[origin] = seqNo;
-        }
-    }
+//     // Parse the status message
+//     while (getline(ss, token, ' ')) {
+//         size_t delimPos = token.find(":");
+//         if (delimPos != string::npos) {
+//             string origin = token.substr(0, delimPos);
+//             int seqNo = stoi(token.substr(delimPos + 1));
+//             peerStatus[origin] = seqNo;
+//         }
+//     }
 
-    // Determine messages to send based on comparison
-    for (const auto& [origin, seqNo] : maxSeqNos) {
-        auto it = peerStatus.find(origin);
-        if (it == peerStatus.end() || it->second < seqNo) {
-            // The peer is missing at least one message from this origin.
-            for (const auto& msg : chatLogs[origin]) {
-                if (msg.seqNo >= (it == peerStatus.end() ? 1 : it->second)) {
-                    // Send messages the peer is missing
-                    string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
-                    sendMessage(sock, messageString);
-                    sentRumor = true;
-                }
-            }
-        }
-    }
+//     // Determine messages to send based on comparison
+//     for (const auto& [origin, seqNo] : maxSeqNos) {
+//         auto it = peerStatus.find(origin);
+//         if (it == peerStatus.end() || it->second < seqNo) {
+//             // The peer is missing at least one message from this origin.
+//             for (const auto& msg : chatLogs[origin]) {
+//                 if (msg.seqNo >= (it == peerStatus.end() ? 1 : it->second)) {
+//                     // Send messages the peer is missing
+//                     string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
+//                     sendMessage(sock, messageString);
+//                     sentRumor = true;
+//                 }
+//             }
+//         }
+//     }
 
-    // Check if we are missing messages
-    for (const auto& [origin, seqNo] : peerStatus) {
-        if (maxSeqNos[origin] < seqNo) {
-            shouldSendOwnStatus = true;
-            break;
-        }
-    }
+//     // Check if we are missing messages
+//     for (const auto& [origin, seqNo] : peerStatus) {
+//         if (maxSeqNos[origin] < seqNo) {
+//             shouldSendOwnStatus = true;
+//             break;
+//         }
+//     }
 
-    if (shouldSendOwnStatus) {
-        string myStatus = compileStatusMessage();
-        sendMessage(sock, myStatus); // Assume this sends the status message back to the peer
-    }
-    if (!sentRumor && !shouldSendOwnStatus) {
-        if (flipCoin()) {
-            int newNeighborPort = getRandomNeighborPort(sock);
-            if (newNeighborPort != -1) {
-                string myStatus = compileStatusMessage();
-                sendMessage(newNeighborPort, myStatus); // Send your status to start rumormongering with the new neighbor
-            } else {
-                std::cout << "No valid neighbors to continue rumormongering." << std::endl;
-            }
-        } else {
-            // Tails: Cease the rumormongering process
-            std::cout << "Ceasing rumormongering process." << std::endl;
-        }
-    }
-}
+//     if (shouldSendOwnStatus) {
+//         string myStatus = compileStatusMessage();
+//         sendMessage(sock, myStatus); // Assume this sends the status message back to the peer
+//     }
+//     if (!sentRumor && !shouldSendOwnStatus) {
+//         if (flipCoin()) {
+//             int newNeighborPort = getRandomNeighborPort(sock);
+//             if (newNeighborPort != -1) {
+//                 string myStatus = compileStatusMessage();
+//                 sendMessage(newNeighborPort, myStatus); // Send your status to start rumormongering with the new neighbor
+//             } else {
+//                 std::cout << "No valid neighbors to continue rumormongering." << std::endl;
+//             }
+//         } else {
+//             // Tails: Cease the rumormongering process
+//             std::cout << "Ceasing rumormongering process." << std::endl;
+//         }
+//     }
+// }
 
 void antiEntropy() {
     while (true) {
@@ -351,7 +352,7 @@ void antiEntropy() {
 
 string compileStatusMessage() {
     lock_guard<mutex> guard(logsMutex);
-    string status = "STATUS";
+    string status = "STATUS " + serverIdentifier;
     for (const auto& [origin, seqNo] : maxSeqNos) {
         status += " " + origin + ":" + to_string(seqNo);
     }
