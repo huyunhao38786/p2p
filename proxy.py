@@ -50,7 +50,7 @@ class ClientHandler(Thread):
                 try:
                     data = self.sock.recv(1024)
                     #sys.stderr.write(data)
-                    self.buffer += data
+                    self.buffer += data.decode('utf-8')
                 except:
                     #print sys.exc_info()
                     self.valid = False
@@ -122,6 +122,10 @@ def main():
             continue
         pid = int(sp2[0]) # first field is pid
         cmd = sp2[1] # second field is command
+        pid_str = ''
+        for shown_pid in threads:
+            pid_str += str(shown_pid) + ' '
+        print(f'pid: {pid_str}')
         if cmd == 'start':
             port = int(sp2[3])
             # sleep a while if a process is going to recover -- to avoid the
@@ -142,6 +146,7 @@ def main():
             print(address)
             print(port)
             handler = ClientHandler(pid, address, port)
+            print(f'add {pid} to threads')
             threads[pid] = handler
             handler.start()
         else:

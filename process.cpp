@@ -16,7 +16,7 @@ using namespace std;
 
 const int BASE_PORT = 20000; // Base port number for server-server communication
 const size_t MSG_SIZE = 1024; // Maximum message size
-const int MAX_PEERS = 4;
+int MAX_PEERS = 4;
 
 // Message struct for storing chat messages
 struct Message {
@@ -48,10 +48,11 @@ void processNewClientMessage(int sock, const string& receivedData);
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
-        cerr << "Usage: " << argv[0] << " <processID> <nProcesses> <portNo>" << endl;
+        cerr << "Usage: <processID> start <nProcesses> <portNo>" << endl;
         return 1;
     }
-
+    int nProcesses = stoi(argv[2]);
+    MAX_PEERS = nProcesses;
     int portNo = stoi(argv[3]);
     // Start anti-entropy process
     thread antiEntropyThread(antiEntropy);
@@ -91,93 +92,86 @@ void startServer(int port) {
 
     cout << "Server started on port " << port << endl;
 
-    while (true) {
+    while(true){
         sockaddr_in clientAddr{};
         socklen_t clientAddrSize = sizeof(clientAddr);
         int clientSock = accept(serverSock, (struct sockaddr*)&clientAddr, &clientAddrSize);
         if (clientSock < 0) {
             cerr << "Error accepting connection." << endl;
-            continue;
+            exit(1);
         }
-        thread(handleConnection, clientSock).detach(); // Start a new thread to handle the connection
+        thread clientThead(handleConnection, clientSock);
+        clientThead.detach();
     }
 }
 
 void handleConnection(int sock) {
     char buffer[MSG_SIZE];
-    memset(buffer, 0, MSG_SIZE); // Initialize the buffer to zero
+    while(true){
+        memset(buffer, 0, MSG_SIZE); // Initialize the buffer to zero
 
-    // Attempt to receive data from the socket
-    ssize_t bytesReceived = recv(sock, buffer, MSG_SIZE - 1, 0);
-    if (bytesReceived <= 0) {
-        cerr << "Error reading from socket or connection closed." << endl;
-        close(sock); // Close the socket if an error occurs or if the connection is closed
-        return;
+        // Attempt to receive data from the socket
+        ssize_t bytesReceived = recv(sock, buffer, MSG_SIZE - 1, 0);
+        if (bytesReceived <= 0) {
+            continue;
+        }
+
+        // Convert the received data into a string for easier processing
+        string receivedData(buffer, bytesReceived);
+        cout << serverIdentifier << " receive: " <<  receivedData << endl;
+        // Inside handleConnection
+        if (receivedData.find("get chatLog") == 0) {
+            processProxyCommand(sock, "get chatLog");
+        } else if (receivedData.find("crash") == 0) {
+            processProxyCommand(sock, "crash");
+        } else if (receivedData.find("RUMOR") == 0) {
+            processPeerMessage(receivedData, "RUMOR");
+            break;
+        } else if (receivedData.find("STATUS") == 0) {
+            processPeerMessage(receivedData, "STATUS");
+            break;
+        } else if (receivedData.find("msg") == 0) {
+            processNewClientMessage(sock, receivedData);
+        }
     }
-
-    // Convert the received data into a string for easier processing
-    string receivedData(buffer, bytesReceived);
-
-    // Inside handleConnection
-    if (receivedData.find("get chatLog") == 0) {
-        processProxyCommand(sock, "get chatLog");
-    } else if (receivedData.find("crash") == 0) {
-        processProxyCommand(sock, "crash");
-    } else if (receivedData.find("RUMOR") == 0) {
-        processPeerMessage(sock, receivedData, "RUMOR");
-    } else if (receivedData.find("STATUS") == 0) {
-        processPeerMessage(sock, receivedData, "STATUS");
-    } else if (receivedData.find("msg") == 0) {
-        processNewClientMessage(sock, receivedData);
-    }
-
-
-    close(sock); // Close the socket after processing the command or message
+    close(sock);
 }
 
 void processNewClientMessage(int sock, const string& receivedData) {
-    // Assuming receivedData format for new message is "msg <Origin> <Text>"
     stringstream ss(receivedData);
-    string messageType, origin, text;
-    
-    getline(ss, messageType, ' '); // Skip the "msg" part
-    getline(ss, origin, ' '); // Get the origin (username or identifier)
-    
-    getline(ss, text); // The rest is the message text
-    
-    int newSeqNo;
-    {
-        lock_guard<mutex> guard(logsMutex); // Ensure thread safety when accessing shared data
-        
-        // If this server is the origin of the message, increment sequence number for this origin
-        if (origin == serverIdentifier) { // Replace with actual check for server's identifier
-            maxSeqNos[origin]++; // Increment sequence number for new message
-            newSeqNo = maxSeqNos[origin];
-        } else {
-            // If the message is being forwarded and already has a sequence number, use that
-            // This part assumes the receivedData includes the sequence number for forwarded messages
-            // You'll need to adjust how you parse receivedData to extract the sequence number if forwarding
-            newSeqNo = stoi(text.substr(0, text.find(' '))); // Example, adjust based on actual format
-            text = text.substr(text.find(' ') + 1); // Adjust based on actual format
-        }
-        
-        // Store the new message in the chat log
-        chatLogs[origin].push_back({origin, newSeqNo, text});
-    }
-    
-    // Forward the message to another peer
-    forwardMessage({origin, newSeqNo, text}, sock);
+    string messageType, messageID, messageText;
+    getline(ss, messageType, ' ');
+    getline(ss, messageID, ' ');
+    getline(ss, messageText);
+
+    lock_guard<mutex> guard(logsMutex);
+
+    string origin = serverIdentifier;
+    int seqNo = ++maxSeqNos[origin];
+    chatLogs[origin].emplace_back(Message{origin, seqNo, messageText});
+
+    Message msg{origin, seqNo, messageText};
+    forwardMessage(msg, stoi(serverIdentifier));
 }
 
 void processProxyCommand(int sock, const string& command) {
     if (command == "get chatLog") {
         lock_guard<mutex> guard(logsMutex);
         stringstream chatLogStream;
+        chatLogStream << "chatLog ";
+        vector<string> v_message;
         for (const auto& [origin, messages] : chatLogs) {
             for (const auto& message : messages) {
-                chatLogStream << message.origin << ":" << message.seqNo << ":" << message.text << ",";
+                v_message.push_back(message.text);
             }
         }
+        for(int i = 0; i < v_message.size(); i++){
+            chatLogStream << v_message[i];
+            if(i != v_message.size() - 1){
+                chatLogStream << ",";
+            }
+        }
+        chatLogStream << '\n';
         string chatLog = chatLogStream.str();
         // Send back to proxy
         send(sock, chatLog.c_str(), chatLog.length(), 0);
@@ -186,7 +180,7 @@ void processProxyCommand(int sock, const string& command) {
     }
 }
 
-void processPeerMessage(int sock, const string& message, const string& messageType) {
+void processPeerMessage(const string& message, const string& messageType) {
     // Lock mutex for thread safety
     lock_guard<mutex> guard(logsMutex);
 
@@ -199,24 +193,52 @@ void processPeerMessage(int sock, const string& message, const string& messageTy
         text = text.substr(1); // Remove leading space
 
         // Check if this is a new message
+        if (maxSeqNos.find(origin) == maxSeqNos.end()){
+            chatLogs[origin] = vector<Message>{};
+            maxSeqNos[origin] = 0;
+        }
         if (maxSeqNos[origin] < seqNo) {
             // Update chat log and max sequence number
             chatLogs[origin].push_back({origin, seqNo, text});
             maxSeqNos[origin] = seqNo;
 
             // Forward the message to another peer
-            forwardMessage({origin, seqNo, text}, sock);
+            forwardMessage({origin, seqNo, text}, stoi(serverIdentifier));
         }
     } else if (messageType == "STATUS") {
         // Process the status message
         // Respond with any messages the sender is missing
-        respondToStatus(sock, message);
+        stringstream ss(message);
+        string dummy, peerOrigin;
+        int peerSeqNo;
+
+        ss >> dummy;
+        unordered_map<string, int> peerStatus;
+        while(ss >> peerOrigin >> peerSeqNo){
+            peerStatus[peerOrigin] = peerSeqNo;
+        }
+        for(const auto& [origin, seqNo]: maxSeqNos){
+            if(peerStatus.find(origin) == peerStatus.end() || peerStatus[origin] < seqNo){
+                for(const auto& msg : chatLogs[origin]){
+                    if(msg.seqNo >= peerStatus[origin]){
+                        int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                        sendMessage(destPort, "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + "  " + msg.text);
+                    }
+                }
+            }
+        }
+        for(const auto& [peerOrigin, peerSeqNo] : peerStatus){
+            if(maxSeqNos[peerOrigin] < peerSeqNo){
+                int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                sendMessage(destPort, compileStatusMessage());
+            }
+        }
     }
 }
 
 void forwardMessage(const Message& msg, int currPort) {
     int destPort = getRandomNeighborPort(currPort);
-
+    cout << "send to neighbor: " << destPort << endl;
     // Convert the message to string format
     string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
     
@@ -315,6 +337,7 @@ string compileStatusMessage() {
 
 void sendMessage(int destPort, const string& msg) {
     // Create a socket
+    cout << "try to send " << msg << " to " << destPort << endl;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         cerr << "Error creating socket for sending message." << endl;
@@ -341,6 +364,7 @@ void sendMessage(int destPort, const string& msg) {
 
     // Close the socket after sending the message
     close(sock);
+    cout << "send " << msg << " to " << destPort << endl;
 }
 
 int getRandomNeighborPort(int currentPort) {
