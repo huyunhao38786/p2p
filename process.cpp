@@ -17,7 +17,6 @@ using namespace std;
 const int BASE_PORT = 20000; // Base port number for server-server communication
 const size_t MSG_SIZE = 1024; // Maximum message size
 int MAX_PEERS = 4;
-int SERVER_COUNT = 0;
 
 // Message struct for storing chat messages
 struct Message {
@@ -34,7 +33,7 @@ std::string serverIdentifier;
 
 // Function declarations
 void processProxyCommand(int sock, const string& command);
-void processPeerMessage(int sock, const string& message, const string& messageType);
+void processPeerMessage(const string& message, const string& messageType);
 void forwardMessage(const Message& msg, int currPort);
 void respondToStatus(int sock, const string& statusMessage);
 string compileStatusMessage();
@@ -45,8 +44,7 @@ void startServer(int port);
 int getRandomNeighborPort(int currentPort);
 bool flipCoin();
 void processNewClientMessage(int sock, const string& receivedData);
-void processPeerMessage(const string& message, const string& messageType);
-bool isPortActive(int port);
+
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
@@ -94,7 +92,6 @@ void startServer(int port) {
 
     cout << "Server started on port " << port << endl;
 
-    SERVER_COUNT++;
     while(true){
         sockaddr_in clientAddr{};
         socklen_t clientAddrSize = sizeof(clientAddr);
@@ -159,7 +156,7 @@ void processNewClientMessage(int sock, const string& receivedData) {
 
 void processProxyCommand(int sock, const string& command) {
     if (command == "get chatLog") {
-        lock_guard<mutex> guard(logsMutex);
+        // lock_guard<mutex> guard(logsMutex);
         stringstream chatLogStream;
         chatLogStream << "chatLog ";
         vector<string> v_message;
@@ -178,6 +175,7 @@ void processProxyCommand(int sock, const string& command) {
         string chatLog = chatLogStream.str();
         // Send back to proxy
         send(sock, chatLog.c_str(), chatLog.length(), 0);
+        cout << "return chatLog to proxy." << endl;
     } else if (command == "crash") {
         exit(0);
     }
@@ -209,6 +207,8 @@ void processPeerMessage(const string& message, const string& messageType) {
             forwardMessage({origin, seqNo, text}, stoi(serverIdentifier));
         }
     } else if (messageType == "STATUS") {
+        bool sentStatus = false;
+        bool sentRumor = false;
         // Process the status message
         // Respond with any messages the sender is missing
         stringstream ss(message);
@@ -225,6 +225,7 @@ void processPeerMessage(const string& message, const string& messageType) {
                 for(const auto& msg : chatLogs[origin]){
                     if(msg.seqNo >= peerStatus[origin]){
                         int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                        sentRumor = true;
                         sendMessage(destPort, "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + "  " + msg.text);
                     }
                 }
@@ -232,8 +233,24 @@ void processPeerMessage(const string& message, const string& messageType) {
         }
         for(const auto& [peerOrigin, peerSeqNo] : peerStatus){
             if(maxSeqNos[peerOrigin] < peerSeqNo){
+                sentStatus = true;
                 int destPort = getRandomNeighborPort(stoi(serverIdentifier));
                 sendMessage(destPort, compileStatusMessage());
+                break;
+            }
+        }
+        if(!sentRumor && sentStatus){
+            if(flipCoin()){
+                int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+                if(destPort != -1){
+                    sendMessage(destPort, compileStatusMessage());
+                }
+                else{
+                    cout << "No valid neighbors to continue rumormongering." << endl;
+                }
+            }
+            else{
+                cout << "Ceasing rumormongering process." << endl;
             }
         }
     }
@@ -318,15 +335,14 @@ void antiEntropy() {
     while (true) {
         this_thread::sleep_for(chrono::seconds(10)); // Adjust timing as needed
 
-        int destPort = getRandomNeighborPort(stoi(serverIdentifier));
+        int peerIndex = rand() % MAX_PEERS;
+        int destPort = BASE_PORT + peerIndex;
 
         // Compile a status message
         string statusMessage = compileStatusMessage();
 
         // Send the status message to a randomly selected peer
-        if (destPort != -1) {
-            sendMessage(destPort, statusMessage);
-        }
+        sendMessage(destPort, statusMessage);
     }
 }
 
@@ -341,7 +357,6 @@ string compileStatusMessage() {
 
 void sendMessage(int destPort, const string& msg) {
     // Create a socket
-    cout << "try to send " << msg << " to " << destPort << endl;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         cerr << "Error creating socket for sending message." << endl;
@@ -357,7 +372,7 @@ void sendMessage(int destPort, const string& msg) {
     // Connect to the destination
     if (connect(sock, (sockaddr*)&destAddr, sizeof(destAddr)) < 0) {
         cerr << "Error connecting to destination port: " << destPort << endl;
-        close(sock); // Close the socket if unable to connect
+        close(sock); // Close the socket if unaFull Yearble to connect
         return;
     }
 
@@ -374,26 +389,25 @@ void sendMessage(int destPort, const string& msg) {
 int getRandomNeighborPort(int currentPort) {
     vector<int> possibleNeighbors;
 
-    // Check if the previous port is active and valid
-    if (currentPort > BASE_PORT && isPortActive(currentPort - 1)) {
+    // Check if the previous port is valid
+    if (currentPort > BASE_PORT) {
         possibleNeighbors.push_back(currentPort - 1);
     }
 
-    // Check if the next port is active and valid
-    if (currentPort < BASE_PORT + SERVER_COUNT - 1 && isPortActive(currentPort + 1)) {
+    // Check if the next port is valid
+    if (currentPort < BASE_PORT + MAX_PEERS - 1) {
         possibleNeighbors.push_back(currentPort + 1);
     }
 
-    // Now, randomly select a neighbor from the possible (and active) options
+    // Now, randomly select a neighbor from the possible options
     if (!possibleNeighbors.empty()) {
         srand(time(0) + currentPort); // Use currentPort to seed for variety per process
         int randomIndex = rand() % possibleNeighbors.size();
         return possibleNeighbors[randomIndex];
     }
 
-    return -1; // Indicate an error or no valid (active) neighbors
+    return -1; // Indicate an error or no valid neighbors
 }
-
 
 bool flipCoin() {
     std::random_device rd; // Obtain a random number from hardware
@@ -401,22 +415,4 @@ bool flipCoin() {
     std::bernoulli_distribution d(0.5); // Define a distribution with a 50/50 chance
 
     return d(gen); // Returns true for "heads", false for "tails"
-}
-
-bool isPortActive(int port) {
-    int testSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (testSock < 0) {
-        cerr << "Error creating socket for testing port activity." << endl;
-        return false;
-    }
-
-    sockaddr_in testAddr{};
-    testAddr.sin_family = AF_INET;
-    testAddr.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &testAddr.sin_addr);
-
-    // Attempt to connect to the port
-    bool active = connect(testSock, (sockaddr*)&testAddr, sizeof(testAddr)) >= 0;
-    close(testSock); // Close the socket after testing
-    return active;
 }
