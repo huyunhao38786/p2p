@@ -17,6 +17,7 @@ using namespace std;
 const int BASE_PORT = 20000; // Base port number for server-server communication
 const size_t MSG_SIZE = 1024; // Maximum message size
 int MAX_PEERS = 4;
+int SERVER_COUNT = 0;
 
 // Message struct for storing chat messages
 struct Message {
@@ -44,7 +45,7 @@ void startServer(int port);
 int getRandomNeighborPort(int currentPort);
 bool flipCoin();
 void processNewClientMessage(int sock, const string& receivedData);
-
+void processPeerMessage(const string& message, const string& messageType);
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
@@ -92,6 +93,7 @@ void startServer(int port) {
 
     cout << "Server started on port " << port << endl;
 
+    SERVER_COUNT++;
     while(true){
         sockaddr_in clientAddr{};
         socklen_t clientAddrSize = sizeof(clientAddr);
@@ -315,7 +317,7 @@ void antiEntropy() {
     while (true) {
         this_thread::sleep_for(chrono::seconds(10)); // Adjust timing as needed
 
-        int peerIndex = rand() % MAX_PEERS;
+        int peerIndex = rand() % SERVER_COUNT;
         int destPort = BASE_PORT + peerIndex;
 
         // Compile a status message
