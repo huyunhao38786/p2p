@@ -17,6 +17,7 @@ using namespace std;
 const int BASE_PORT = 20000; // Base port number for server-server communication
 const size_t MSG_SIZE = 1024; // Maximum message size
 int MAX_PEERS = 4;
+int SERVER_COUNT = 0;
 
 // Message struct for storing chat messages
 struct Message {
@@ -92,6 +93,7 @@ void startServer(int port) {
 
     cout << "Server started on port " << port << endl;
 
+    SERVER_COUNT++;
     while(true){
         sockaddr_in clientAddr{};
         socklen_t clientAddrSize = sizeof(clientAddr);
