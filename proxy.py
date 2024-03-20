@@ -146,7 +146,6 @@ def main():
             print(address)
             print(port)
             handler = ClientHandler(pid, address, port)
-            print(f'add {pid} to threads')
             threads[pid] = handler
             handler.start()
         else:
@@ -155,6 +154,7 @@ def main():
                 send(pid, sp1[1])
             elif cmd[:5] == 'crash': # crashXXX
                 send(pid, sp1[1])
+                del threads[pid]
             elif cmd == 'get': # get chatLog
                 if not wait_chat_log: # sleep for the first continous get command
                     time.sleep(1)

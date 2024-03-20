@@ -17,8 +17,7 @@ using namespace std;
 const int BASE_PORT = 20000; // Base port number for server-server communication
 const size_t MSG_SIZE = 1024; // Maximum message size
 int MAX_PEERS = 4;
-int SERVER_COUNT = 0;
-
+int crash_flag = 0;
 // Message struct for storing chat messages
 struct Message {
     string origin;
@@ -29,11 +28,13 @@ struct Message {
 // Global data structures
 unordered_map<string, vector<Message>> chatLogs; // Chat logs separated by origin
 unordered_map<string, int> maxSeqNos; // Highest sequence number seen for each origin
+unordered_map<string, bool> message_history;
 mutex logsMutex; // Mutex for synchronizing access to chatLogs and maxSeqNos
 std::string serverIdentifier;
 
 // Function declarations
 void processProxyCommand(int sock, const string& command);
+void processPeerMessage(const string& message, const string& messageType);
 void forwardMessage(const Message& msg, int currPort);
 void respondToStatus(int sock, const string& statusMessage);
 string compileStatusMessage();
@@ -44,8 +45,8 @@ void startServer(int port);
 int getRandomNeighborPort(int currentPort);
 bool flipCoin();
 void processNewClientMessage(int sock, const string& receivedData);
-void processPeerMessage(const string& message, const string& messageType);
 bool isPortActive(int port);
+
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
@@ -93,8 +94,8 @@ void startServer(int port) {
 
     cout << "Server started on port " << port << endl;
 
-    SERVER_COUNT++;
     while(true){
+        if(crash_flag == 1) exit(0);
         sockaddr_in clientAddr{};
         socklen_t clientAddrSize = sizeof(clientAddr);
         int clientSock = accept(serverSock, (struct sockaddr*)&clientAddr, &clientAddrSize);
@@ -120,12 +121,13 @@ void handleConnection(int sock) {
 
         // Convert the received data into a string for easier processing
         string receivedData(buffer, bytesReceived);
-        cout << serverIdentifier << " receive: " <<  receivedData << endl;
         // Inside handleConnection
         if (receivedData.find("get chatLog") == 0) {
             processProxyCommand(sock, "get chatLog");
         } else if (receivedData.find("crash") == 0) {
-            processProxyCommand(sock, "crash");
+            crash_flag = 1;
+            close(sock);
+            exit(0);
         } else if (receivedData.find("RUMOR") == 0) {
             processPeerMessage(receivedData, "RUMOR");
             break;
@@ -146,7 +148,7 @@ void processNewClientMessage(int sock, const string& receivedData) {
     getline(ss, messageID, ' ');
     getline(ss, messageText);
 
-    lock_guard<mutex> guard(logsMutex);
+    // lock_guard<mutex> guard(logsMutex);
 
     string origin = serverIdentifier;
     int seqNo = ++maxSeqNos[origin];
@@ -175,33 +177,34 @@ void processProxyCommand(int sock, const string& command) {
         }
         chatLogStream << '\n';
         string chatLog = chatLogStream.str();
+        // cout << "chatLog in C++: " << chatLog << endl;
         // Send back to proxy
         send(sock, chatLog.c_str(), chatLog.length(), 0);
-        cout << "return chatLog to proxy." << endl;
     } else if (command == "crash") {
         exit(0);
     }
 }
 
 void processPeerMessage(const string& message, const string& messageType) {
-    // Lock mutex for thread safety
-    lock_guard<mutex> guard(logsMutex);
+    // cout << serverIdentifier << " receive: " << message << endl;
+    // lock_guard<mutex> guard(logsMutex);
 
     if (messageType == "RUMOR") {
         stringstream ss(message);
-        string dummy, origin, text, msgOrigin;
+        string dummy, msgOrigin, origin, text;
         int seqNo;
-        ss >> dummy >> origin >> seqNo >> msgOrigin;
+        ss >> dummy >> msgOrigin >> origin >> seqNo;
         getline(ss, text);
         text = text.substr(1); // Remove leading space
         string myStatus = compileStatusMessage();
-        sendMessage(stoi(msgOrigin), myStatus); // sends the status message back to the peer
+        sendMessage(stoi(msgOrigin), myStatus);
         // Check if this is a new message
         if (maxSeqNos.find(origin) == maxSeqNos.end()){
             chatLogs[origin] = vector<Message>{};
-            maxSeqNos[origin] = 0;
+            maxSeqNos[origin] = -1;
         }
         if (maxSeqNos[origin] < seqNo) {
+            // cout << serverIdentifier << " insert " << origin << " " << seqNo << " " << text << endl;
             // Update chat log and max sequence number
             chatLogs[origin].push_back({origin, seqNo, text});
             maxSeqNos[origin] = seqNo;
@@ -215,7 +218,7 @@ void processPeerMessage(const string& message, const string& messageType) {
         // Process the status message
         // Respond with any messages the sender is missing
         stringstream ss(message);
-        string dummy, peerOrigin, msgOrigin;
+        string dummy, msgOrigin, peerOrigin;
         int peerSeqNo;
 
         ss >> dummy >> msgOrigin;
@@ -223,22 +226,25 @@ void processPeerMessage(const string& message, const string& messageType) {
         while(ss >> peerOrigin >> peerSeqNo){
             peerStatus[peerOrigin] = peerSeqNo;
         }
+        // cout << serverIdentifier << " StatusNow: " << compileStatusMessage() << endl;
         for(const auto& [origin, seqNo]: maxSeqNos){
             if(peerStatus.find(origin) == peerStatus.end() || peerStatus[origin] < seqNo){
                 for(const auto& msg : chatLogs[origin]){
                     if(msg.seqNo >= peerStatus[origin]){
-                        int destPort = stoi(msgOrigin); // should be the status message origin
+                        int destPort = stoi(msgOrigin);
                         sentRumor = true;
-                        sendMessage(destPort, "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + "  " + serverIdentifier + " " + msg.text);
+                        if(destPort != -1)
+                            sendMessage(destPort, "RUMOR " + serverIdentifier + " " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text);
                     }
                 }
             }
         }
         for(const auto& [peerOrigin, peerSeqNo] : peerStatus){
-            if(maxSeqNos[peerOrigin] < peerSeqNo){
+            if(maxSeqNos.find(peerOrigin) == maxSeqNos.end() || maxSeqNos[peerOrigin] < peerSeqNo){
                 sentStatus = true;
                 int destPort = stoi(msgOrigin);
-                sendMessage(destPort, compileStatusMessage());
+                if(destPort != -1)
+                    sendMessage(destPort, compileStatusMessage());
                 break;
             }
         }
@@ -261,12 +267,12 @@ void processPeerMessage(const string& message, const string& messageType) {
 
 void forwardMessage(const Message& msg, int currPort) {
     int destPort = getRandomNeighborPort(currPort);
-    cout << "send to neighbor: " << destPort << endl;
     // Convert the message to string format
-    string messageString = "RUMOR " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
+    string messageString = "RUMOR " + serverIdentifier + " " + msg.origin + " " + to_string(msg.seqNo) + " " + msg.text;
     
     // Send the message
-    sendMessage(destPort, messageString);
+    if(destPort != -1)
+        sendMessage(destPort, messageString);
 }
 
 // void respondToStatus(int sock, const string& statusMessage) {
@@ -344,17 +350,16 @@ void antiEntropy() {
         string statusMessage = compileStatusMessage();
 
         // Send the status message to a randomly selected peer
-        if (destPort != -1) {
+        if (destPort != -1)
             sendMessage(destPort, statusMessage);
-        }
     }
 }
 
 string compileStatusMessage() {
-    lock_guard<mutex> guard(logsMutex);
+    // lock_guard<mutex> guard(logsMutex);
     string status = "STATUS " + serverIdentifier;
     for (const auto& [origin, seqNo] : maxSeqNos) {
-        status += " " + origin + ":" + to_string(seqNo);
+        status += " " + origin + " " + to_string(seqNo);
     }
     return status;
 }
@@ -375,7 +380,7 @@ void sendMessage(int destPort, const string& msg) {
 
     // Connect to the destination
     if (connect(sock, (sockaddr*)&destAddr, sizeof(destAddr)) < 0) {
-        cerr << "Error connecting to destination port: " << destPort << endl;
+        // cerr << "Error connecting to destination port: " << destPort << endl;
         close(sock); // Close the socket if unaFull Yearble to connect
         return;
     }
@@ -387,32 +392,31 @@ void sendMessage(int destPort, const string& msg) {
 
     // Close the socket after sending the message
     close(sock);
-    cout << "send " << msg << " to " << destPort << endl;
+    // cout << serverIdentifier << " send " << msg << " to " << destPort << endl;
 }
 
 int getRandomNeighborPort(int currentPort) {
     vector<int> possibleNeighbors;
 
-    // Check if the previous port is active and valid
+    // Check if the previous port is valid
     if (currentPort > BASE_PORT && isPortActive(currentPort - 1)) {
         possibleNeighbors.push_back(currentPort - 1);
     }
 
-    // Check if the next port is active and valid
-    if (currentPort < BASE_PORT + SERVER_COUNT - 1 && isPortActive(currentPort + 1)) {
+    // Check if the next port is valid
+    if (currentPort < BASE_PORT + MAX_PEERS - 1 && isPortActive(currentPort + 1)) {
         possibleNeighbors.push_back(currentPort + 1);
     }
 
-    // Now, randomly select a neighbor from the possible (and active) options
+    // Now, randomly select a neighbor from the possible options
     if (!possibleNeighbors.empty()) {
         srand(time(0) + currentPort); // Use currentPort to seed for variety per process
         int randomIndex = rand() % possibleNeighbors.size();
         return possibleNeighbors[randomIndex];
     }
 
-    return -1; // Indicate an error or no valid (active) neighbors
+    return -1; // Indicate an error or no valid neighbors
 }
-
 
 bool flipCoin() {
     std::random_device rd; // Obtain a random number from hardware
